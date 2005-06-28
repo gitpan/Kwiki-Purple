@@ -1,11 +1,11 @@
 
+* Support adding nids to wafl blocks.
+
 * More tests. The existing tests only cover the very basics.
 
 * Create a Sequence index so we can do transclusions from other wikis
   and other sources of nid identified content (such as all the stuff
   that PurpleWiki supports).
-
-* Add CGI action for returning raw and formatted node content.
 
 * Give more nodes nids
 

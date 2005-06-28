@@ -3,7 +3,6 @@ use warnings;
 use Test::More tests => 4;
 use Kwiki::Test;
 
-use lib $ENV{KWIKI_REPOSITORY_BASE};
 use lib '../lib';
 
 # so init in Kwiki::Purple is followed

@@ -6,27 +6,20 @@ const class_id             => 'purple';
 const class_title          => 'Purple';
 const css_file             => 'purple.css';
 const hook_classes         => [qw(heading p li td)];
+const cgi_class            => 'Kwiki::Purple::CGI';
 
 field hooked => 0;
 
 # XXX some of these don't work, such a titlehyper
-my %formatter_text_flags = (
-    strong      => [qw(* *)],
-    em          => [qw(/ /)],
-    u           => [qw(_ _)],
-    tt          => [qw([= ])],
-    del         => [qw(- -)],
-    forced      => [qw([ ])],
-    titlehyper  => [qw([ ])],
-    titlewiki   => [qw([ ])],
-    titlemailto => [qw([ ])],
-    asis        => [qw({{ }})],
-    tr          => ['|', "\n"],
-    td          => ['', '|'],
-    hr          => ['----', "\n\n"],
+ my %formatter_text_flags = (
+     tr          => ['|', "\n"],
+     td          => ['', '|'],
+     hr          => ['----', "\n\n"],
 );
+# actually, we don't want to to_text on the Phrases, just the blocks
+#my %formatter_text_flags = ();
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 sub init {
     super;
@@ -39,6 +32,7 @@ sub register {
     $registry->add(hook => 'page:store', pre => 'update_nids');
     $registry->add(wafl => nid => 'Kwiki::Purple::Nid::Wafl');
     $registry->add(wafl => t => 'Kwiki::Purple::Transclusion::Wafl');
+    $registry->add(action => 'get_node');
     $registry->add(prerequisite => 'purple_sequence');
 }
 
@@ -185,6 +179,48 @@ sub write_node {
     io($self->plugin_directory . '/' . $nid . '.name')->print($page_id);
 }
 
+sub get_node {
+    my $nid = $self->cgi->nid;
+    my $format = $self->cgi->format || 'raw';
+    $self->retrieve_node($nid, $format);
+}
+sub retrieve_node {
+    my $nid = shift;
+    my $format = shift;
+    my $method = 'retrieve_node_' . $format;
+    $self->$method($nid);
+}
+
+sub retrieve_node_raw {
+    my $nid = shift;
+    $self->hub->headers->content_type('text/plain');
+    $self->read_node($nid);
+}
+
+# Track recursion loops, at least in this process...
+my $semaphore = [];
+
+sub retrieve_node_html {
+    my $nid = shift;
+    my $text = $self->read_node($nid);
+    my $name = $self->read_node_name($nid);
+    my $script = $self->hub->config->script_name;
+
+    # XXX Loop detection needs to be more effective
+    unless ((grep {$nid} @$semaphore)) {
+        push @$semaphore, $nid;
+        my $unit = Spoon::Formatter::Block->new;
+        $unit->text($text);
+        my $html = $unit->parse->to_html;
+        $semaphore = [];
+        return qq(<span class="transclusion">$html) .
+          qq(&nbsp;<a class="nid" href="$script?$name#nid$nid">T</a></span>);
+    } else {
+        return qq(<a class="transclusion_loop" href="$script?$name#nid$nid">) .
+          qq(TLE</a>);
+    }
+}
+
 sub read_node {
     my $nid = shift;
     my $file = io($self->plugin_directory . '/' . $nid);
@@ -204,6 +240,13 @@ sub read_node_name {
 sub next_nid {
     $self->hub->purple_sequence->get_next;
 }
+
+##########################################################################
+package Kwiki::Purple::CGI;
+use Kwiki::CGI -base;
+
+cgi 'nid';
+cgi 'format';
 
 ##########################################################################
 package Kwiki::Purple::Nid::Wafl;
@@ -293,33 +336,11 @@ package Kwiki::Purple::Transclusion::Wafl;
 use Spoon::Formatter;
 use base 'Spoon::Formatter::WaflPhrase';
 
-# Track recursion loops, at least in this process...
-my $semaphore = [];
-
-# XXX this has some issues
-# We need the index to know the page name
-# Creating a new Block or Phrase (I've tried both) from the
-#   text seems fraught with danger but it avoids extra white
-#   space and tag closing bullshit while
-#   still getting things like WikiWords formatted
+# XXX this has some issues with looping
 sub to_html {
     my ($nid, @else) = split(' ', $self->arguments);
     return $self->wafl_error unless ($nid and not @else);
-    my $text = $self->hub->purple->read_node($nid);
-    my $name = $self->hub->purple->read_node_name($nid);
-    my $script = $self->hub->config->script_name;
-    unless ((grep {$_ eq $nid} @$semaphore) and not ($text and $name)) {
-        push @$semaphore, $nid;
-        my $unit = Spoon::Formatter::Block->new(hub => $self->hub);
-        $unit->text($text);
-        my $html = $unit->parse->to_html;
-        $semaphore = [];
-        return qq(<span class="transclusion">$html) .
-          qq(&nbsp;<a class="nid" href="$script?$name#nid$nid">T</a></span>);
-    } else {
-        return qq(<a class="transclusion_loop" href="$script?$name#nid$nid">) .
-          qq(TLE</a>);
-    }
+    $self->hub->purple->retrieve_node_html($nid);
 }
 
 package Kwiki::Purple;
