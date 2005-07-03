@@ -7,6 +7,9 @@ const class_title          => 'Purple';
 const css_file             => 'purple.css';
 const hook_classes         => [qw(heading p li td)];
 const cgi_class            => 'Kwiki::Purple::CGI';
+const config_file          => 'purple.yaml';
+const default_retrieval_format => 'raw';
+const timeout              => 60;
 
 field hooked => 0;
 
@@ -19,7 +22,7 @@ field hooked => 0;
 # actually, we don't want to to_text on the Phrases, just the blocks
 #my %formatter_text_flags = ();
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 sub init {
     super;
@@ -157,20 +160,26 @@ sub update {
 sub check_nid {
     my $hook = pop;
     my $unit = $self;
-    $self = $self->hub->purple;
     my $text = $unit->text;
-    my ($nid) = ($text =~ /{nid ([A-Z0-9]+)}\s*/);
+    my $nid;
+    $nid = $1 if ($text =~ /{nid ([A-Z0-9]+)}\s*/);
+
+    $self = $self->hub->purple;
+
+    my $page = $self->hub->pages->current;
+
     unless ($nid) {
-        $nid = $self->next_nid;
+        $nid = $self->next_nid($page);
         $text =~ s/(?: |=)*(\n{0,2})\n*$/ {nid $nid}$1/;
         $unit->text($text);
     }
+
     $self->write_node($nid, $unit->text);
 }
 
 sub write_node {
     # we just went to the trouble of adding the nid, but let's
-    # go ahead and removeit before storing
+    # go ahead and remove it before storing
     my $nid = shift;
     my $text = shift;
     my $page_id = $self->hub->pages->current->id;
@@ -181,7 +190,7 @@ sub write_node {
 
 sub get_node {
     my $nid = $self->cgi->nid;
-    my $format = $self->cgi->format || 'raw';
+    my $format = $self->cgi->format || $self->default_retrieval_format;
     $self->retrieve_node($nid, $format);
 }
 sub retrieve_node {
@@ -202,23 +211,113 @@ my $semaphore = [];
 
 sub retrieve_node_html {
     my $nid = shift;
-    my $text = $self->read_node($nid);
-    my $name = $self->read_node_name($nid);
-    my $script = $self->hub->config->script_name;
+
+    my ($text, $name, $href, $html);
+
+    my $url = $self->hub->purple_sequence->query_index($nid);
+    my $local = $self->is_local($url);
+
+    # yuck
+    if ($local) {
+        $text = $self->read_node($nid);
+        $name = $self->read_node_name($nid);
+        my $script = $self->hub->config->script_name;
+        $href = "$script?$name#nid$nid";
+    } else {
+        if ($self->is_kwiki($url)) {
+            if ($url =~ /^([^\?]+)\?.*page_uri=([^;]+);?/) {
+                $href = $1;
+                $name = $2;
+            }
+            $href = $href . "?$name#nid$nid";
+            $text = $self->retrieve_remote_kwiki_text($url);
+        } else {
+            $html = $self->retrieve_remote_html($url);
+        }
+    }
+
+    return $html if $html;
 
     # XXX Loop detection needs to be more effective
     unless ((grep {$nid} @$semaphore)) {
-        push @$semaphore, $nid;
+        push @$semaphore, $nid if $local;
         my $unit = Spoon::Formatter::Block->new;
         $unit->text($text);
         my $html = $unit->parse->to_html;
-        $semaphore = [];
+        pop(@$semaphore) if $local;
         return qq(<span class="transclusion">$html) .
-          qq(&nbsp;<a class="nid" href="$script?$name#nid$nid">T</a></span>);
+          qq(&nbsp;<a class="nid" href="$href">T</a></span>);
     } else {
-        return qq(<a class="transclusion_loop" href="$script?$name#nid$nid">) .
+        return qq(<a class="transclusion_loop" href="$href">) .
           qq(TLE</a>);
     }
+}
+
+sub is_kwiki {
+    my $url = shift;
+    return ($url =~ /action=get_node/ &&
+            $url =~ /page_uri=/ &&
+            $url =~ /nid=/);
+}
+
+# XXX always fail for now
+sub retrieve_remote_html {
+    return 'remote html retrieval non enabled, get Kwiki::Transclude'
+      unless $self->hub->have_plugin('transclude') or 1;
+}
+
+# XXX refactor to Kwiki-RemoteFetch, with proxy settings
+# and the like, for use by this, FetchRSS, whatever else
+sub retrieve_remote_kwiki_text {
+    my $url = shift;
+    my $content = $self->web_request(
+        method => 'GET',
+        request_url => $url,
+    );
+}
+
+# XXX pull out to own module
+sub web_request {
+    my %param = @_;
+    my $content;
+    my $post_input;
+
+    require LWP::UserAgent;
+    require HTTP::Request::Common;
+
+    my $ua  = LWP::UserAgent->new();
+    $ua->timeout($self->timeout);
+
+    my $method = $param{method};
+    my $request;
+    $request = HTTP::Request::Common::GET
+      ($param{request_url})
+      if $method eq 'GET';
+    $request = HTTP::Request::Common::POST
+      ($param{request_url}, $param{post_data})
+      if $method eq 'POST';
+    die "unsupported method $method" unless defined $method;
+
+    if ($param{username} && $param{password}) {
+        $request->authorization_basic($param{username}, $param{password});
+    }
+
+    my $response = $ua->request($request);
+    if ($response->is_success()) {
+        $content  = $response->content();
+        if (!length($content)) {
+            $content = 'zero length response';
+        }
+    } else {
+        $content = $response->status_line;
+    }
+    return $content;
+}
+
+sub is_local {
+    my $url = shift;
+    my $full_url = $self->full_url;
+    return ($url =~ /^$full_url/);
 }
 
 sub read_node {
@@ -238,7 +337,38 @@ sub read_node_name {
 }
 
 sub next_nid {
-    $self->hub->purple_sequence->get_next;
+    my $page = shift;
+    my $uri = $page->uri;
+
+    my $nid = $self->hub->purple_sequence->get_next;
+    my $url = $self->generate_retrieval_url($uri, $nid,
+        $self->default_retrieval_format);
+    $self->hub->purple_sequence->update_index($url, $nid);
+    return $nid;
+}
+
+sub generate_retrieval_url {
+    my $uri = shift;
+    my $nid = shift;
+    my $format = shift;
+
+    my $url = $self->retrieval_url_base .
+      "?action=get_node;nid=$nid;page_uri=$uri";
+
+    return $url;
+}
+
+# so when we have views we don't run into permissions problems with
+# retrieval
+sub retrieval_url_base {
+    return ($self->config->can('purple_retrieval_url') &&
+      $self->config->purple_retrieval_url)
+      ? $self->config->purple_retrieval_url
+      : $self->full_url;
+}
+
+sub full_url {
+    return CGI::url(-full => 1);
 }
 
 ##########################################################################
@@ -407,6 +537,8 @@ This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself.
 
 =cut
+__config/purple.yaml__
+purple_retrieval_url:
 __css/purple.css__
 a.nid {
     font-family: Verdana, Trebuchet, Arial, Helvetica;

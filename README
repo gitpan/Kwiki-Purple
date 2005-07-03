@@ -4,7 +4,7 @@ numbers to Kwiki. See http://purple.blueoxen.net/ and
 http://purplewiki.blueoxen.net/ for an introduction to the
 concepts and goals of Purple Numbers.
 
-This is very much an alpha version. That means:
+This is an improving alpha version. That means:
 
 * Do not rely on the data structures and text formats used in
   this version to remain supported in the future. There's no

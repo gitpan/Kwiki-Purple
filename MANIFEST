@@ -17,4 +17,5 @@ META.yml
 README
 t/add-nids.t
 t/show-nids.t
+t/sequence.t
 TODO
